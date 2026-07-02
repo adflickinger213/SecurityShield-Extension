@@ -1,7 +1,10 @@
 // Security Shield - Content Script
 document.addEventListener('click', (e) => {
-    if (e.target.tagName === 'A' || e.target.closest('a')) {
-          const link = e.target.tagName === 'A' ? e.target : e.target.closest('a');
+    if (!(e.target instanceof Element)) {
+          return;
+    }
+    const link = e.target.closest('a');
+    if (link) {
           const href = link.getAttribute('href');
           if (href && (href.startsWith('http://') || href.startsWith('https://'))) {
                   checkLink(href, link);
@@ -11,6 +14,9 @@ document.addEventListener('click', (e) => {
 
 function checkLink(url, element) {
     chrome.runtime.sendMessage({ type: 'checkLink', url: url }, (response) => {
+          if (chrome.runtime.lastError || !response) {
+                  return;
+          }
           if (!response.safe) {
                   element.style.borderBottom = '3px dashed #ff4444';
                   element.title = '⚠️ This link may be suspicious. Verify the domain before clicking.';
@@ -33,12 +39,32 @@ if (window.location.protocol === 'https:') {
                   }
           });
     });
-    observer.observe(document.body, { childList: true, subtree: true });
+    // This script runs at document_start, when document.body is still null;
+    // observing the document node covers the whole tree once it is parsed.
+    observer.observe(document, { childList: true, subtree: true });
+}
+
+// DOM-clobbering safe: a page can shadow form.action with
+// <input name="action">, which would make the property return an element
+// instead of the URL and let an insecure form evade the check.
+function getFormAction(form) {
+    const action = form.getAttribute('action');
+    if (typeof action !== 'string' || action === '') {
+          return window.location.href;
+    }
+    try {
+          return new URL(action, window.location.href).href;
+    } catch (e) {
+          return null;
+    }
 }
 
 document.addEventListener('submit', (e) => {
-    const form = e.target;
-    if (form.action && form.action.startsWith('http://')) {
+    if (!(e.target instanceof HTMLFormElement)) {
+          return;
+    }
+    const action = getFormAction(e.target);
+    if (action && action.startsWith('http://')) {
           console.warn('⚠️ WARNING: Form submitting to HTTP (unencrypted) URL');
     }
 }, true);
