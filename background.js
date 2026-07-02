@@ -6,6 +6,11 @@ const THREAT_PATTERNS = [
     /click.*immediately/i
   ];
 
+// Hostnames that look like well-known brands but use character substitutions.
+const LOOKALIKE_PATTERN = /[a0]m[a0]z[o0]n|[a0]pp[a0]l|[a4]ppl[e3]/i;
+// The genuine domains the lookalike pattern would otherwise also match.
+const LEGITIMATE_DOMAINS = ['amazon.com', 'apple.com'];
+
 chrome.storage.local.get('securityLog', (result) => {
     if (!result.securityLog) {
           chrome.storage.local.set({ securityLog: [] });
@@ -19,18 +24,32 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 });
 
 function analyzeTab(tabId, tab) {
-    const url = new URL(tab.url);
+    if (!tab || typeof tab.url !== 'string') {
+          return;
+    }
+    let url;
+    try {
+          url = new URL(tab.url);
+    } catch (e) {
+          return;
+    }
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+          return;
+    }
     const issues = [];
-    if (url.protocol !== 'https:' && url.hostname !== 'localhost') {
+    if (url.protocol !== 'https:' && url.hostname !== 'localhost' && url.hostname !== '127.0.0.1') {
           issues.push({ type: 'http', severity: 'high', message: 'Unencrypted HTTP connection', icon: '⚠️' });
     }
-    if (THREAT_PATTERNS.some(p => p.test(tab.title))) {
+    if (typeof tab.title === 'string' && THREAT_PATTERNS.some(p => p.test(tab.title))) {
           issues.push({ type: 'phishing', severity: 'high', message: 'Possible phishing page', icon: '⛔' });
     }
     if (issues.length > 0) {
+          // Log only origin + path: query strings and fragments can carry
+          // session tokens or personal data that must not persist in storage.
+          const sanitizedUrl = url.origin + url.pathname;
           chrome.storage.local.get('securityLog', (result) => {
-                  const log = result.securityLog || [];
-                  log.push({ timestamp: new Date().toISOString(), url: tab.url, issues: issues });
+                  const log = Array.isArray(result.securityLog) ? result.securityLog : [];
+                  log.push({ timestamp: new Date().toISOString(), url: sanitizedUrl, issues: issues });
                   chrome.storage.local.set({ securityLog: log.slice(-50) });
           });
           chrome.action.setBadgeText({ text: '⚠', tabId });
@@ -38,9 +57,29 @@ function analyzeTab(tabId, tab) {
     }
 }
 
+function isLegitimateDomain(hostname) {
+    return LEGITIMATE_DOMAINS.some(
+          (domain) => hostname === domain || hostname.endsWith('.' + domain)
+    );
+}
+
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-    if (request.type === 'checkLink') {
-          const isSafe = !(/[a0]m[a0]zon|[a0]pp[a0]l/.test(request.url));
-          sendResponse({ safe: isSafe });
+    if (sender.id !== chrome.runtime.id) {
+          return;
     }
+    if (!request || request.type !== 'checkLink' || typeof request.url !== 'string') {
+          return;
+    }
+    let hostname;
+    try {
+          hostname = new URL(request.url).hostname.toLowerCase();
+    } catch (e) {
+          sendResponse({ safe: false });
+          return;
+    }
+    // Only the hostname matters for lookalike detection; matching the full URL
+    // would flag harmless links like example.com/?q=amazon. The genuine
+    // domains are exempted so real amazon.com/apple.com links aren't flagged.
+    const isSafe = isLegitimateDomain(hostname) || !LOOKALIKE_PATTERN.test(hostname);
+    sendResponse({ safe: isSafe });
 });
